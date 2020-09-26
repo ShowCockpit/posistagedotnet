@@ -24,7 +24,7 @@ namespace DBDesign.PosiStageDotNet
 	///     Immutable class representing the entire state of a single PosiStageNet tracker
 	/// </summary>
 	[PublicAPI]
-	public readonly struct PsnTracker : IEquatable<PsnTracker>
+	public struct PsnTracker : IEquatable<PsnTracker>
 	{
         /// <summary>
         ///     Creates a copy of a PsnTracker with updated values

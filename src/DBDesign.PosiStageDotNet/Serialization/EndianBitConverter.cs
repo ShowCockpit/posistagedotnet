@@ -637,7 +637,7 @@ namespace DBDesign.PosiStageDotNet.Serialization
 		///     Union used solely for the equivalent of DoubleToInt64Bits and vice versa.
 		/// </summary>
 		[StructLayout(LayoutKind.Explicit)]
-		private readonly struct Int32SingleUnion
+		private struct Int32SingleUnion
 		{
 			/// <summary>
 			///     Int32 version of the value.
