@@ -23,6 +23,7 @@ using System.Net.Sockets;
 using DBDesign.PosiStageDotNet.Chunks;
 using DBDesign.PosiStageDotNet.Networking;
 using JetBrains.Annotations;
+using SCPosiStageDotNet;
 
 namespace DBDesign.PosiStageDotNet
 {
@@ -61,9 +62,9 @@ namespace DBDesign.PosiStageDotNet
 		private readonly List<PsnDataPacketChunk> _currentDataPacketChunks = new List<PsnDataPacketChunk>();
 		private readonly List<PsnInfoPacketChunk> _currentInfoPacketChunks = new List<PsnInfoPacketChunk>();
 
-		private readonly ConcurrentDictionary<int, PsnTracker> _trackers = new ConcurrentDictionary<int, PsnTracker>();
-
-	    private readonly UdpService _udpService;
+		private readonly ConcurrentDictionary<IPEndPoint, EndPointData> _endpoints = new ConcurrentDictionary<IPEndPoint, EndPointData>();
+        
+        private readonly UdpService _udpService;
 
 		private bool _isDisposed;
 
@@ -79,7 +80,7 @@ namespace DBDesign.PosiStageDotNet
 		/// <param name="isStrict">If true, packets which are imperfect in any way will not be processed</param>
 		public PsnClient([NotNull] IPAddress localIp, bool isStrict = true)
 		{
-			Trackers = new ReadOnlyDictionary<int, PsnTracker>(_trackers);
+			RemoteEndPoints = new ReadOnlyDictionary<IPEndPoint, EndPointData>(_endpoints);
 
 			MulticastIp = DefaultMulticastIp;
 			Port = DefaultPort;
@@ -100,7 +101,7 @@ namespace DBDesign.PosiStageDotNet
 	    /// <exception cref="ArgumentOutOfRangeException"></exception>
 	    public PsnClient([NotNull] IPAddress localIp, [NotNull] IPAddress customMulticastIp, int customPort, bool isStrict = true)
 		{
-	        Trackers = new ReadOnlyDictionary<int, PsnTracker>(_trackers);
+	        RemoteEndPoints = new ReadOnlyDictionary<IPEndPoint, EndPointData>(_endpoints);
 
 			if (customMulticastIp == null)
 				throw new ArgumentNullException(nameof(customMulticastIp));
@@ -150,14 +151,8 @@ namespace DBDesign.PosiStageDotNet
 		/// <summary>
 		///     Dictionary of trackers keyed by tracker index
 		/// </summary>
-		public ReadOnlyDictionary<int, PsnTracker> Trackers { get; }
-
-		/// <summary>
-		///     System name of the remote PosiStageNet server, or null if no info packets have been received
-		/// </summary>
-		[CanBeNull]
-		public string RemoteSystemName { get; private set; }
-
+		public ReadOnlyDictionary<IPEndPoint, EndPointData> RemoteEndPoints { get; }
+        
 		/// <summary>
 		///     Stops listening for data and releases network resources
 		/// </summary>
@@ -172,12 +167,12 @@ namespace DBDesign.PosiStageDotNet
 		/// <summary>
 		///     Called when the value of <see cref="RemoteSystemName" /> is updated
 		/// </summary>
-		public event EventHandler<string> RemoteSystemNameUpdated;
+		public event EventHandler<Tuple<string, EndPointData>> RemoteSystemNameUpdated;
 
 		/// <summary>
 		///     Called when a PosiStageNet data or info packet is received
 		/// </summary>
-		public event EventHandler<ReadOnlyDictionary<int, PsnTracker>> TrackersUpdated;
+		public event EventHandler<TrackerUpdateEventArgs> TrackersUpdated;
 
 		/// <summary>
 		///     Called when a PosiStageNet info packet is received
@@ -232,7 +227,7 @@ namespace DBDesign.PosiStageDotNet
 				throw new InvalidOperationException("Cannot stop listening, client is not currently listening");
 
 			_udpService.PacketReceived -= packetReceived;
-			_udpService.StopListeningAsync().Wait();
+            _udpService.StopListeningAsync();
 			_udpService.DropMulticastGroup(MulticastIp);
 
 			IsListening = false;
@@ -260,28 +255,28 @@ namespace DBDesign.PosiStageDotNet
 		/// <summary>
 		///     Override to provide new behavior for receipt of all PosiStageNet packets
 		/// </summary>
-		protected virtual void OnPacketReceived(PsnPacketChunk packet)
+		protected virtual void OnPacketReceived(IPEndPoint ipEndPoint, PsnPacketChunk packet)
 		{
 			switch (packet.ChunkId)
 			{
 				case PsnPacketChunkId.PsnInfoPacket:
 				{
 					var infoPacket = (PsnInfoPacketChunk)packet;
-					OnInfoPacketReceived(infoPacket);
+					OnInfoPacketReceived(ipEndPoint, infoPacket);
 					InfoPacketReceived?.Invoke(this, infoPacket);
 				}
 					break;
 				case PsnPacketChunkId.PsnDataPacket:
 				{
 					var dataPacket = (PsnDataPacketChunk)packet;
-					OnDataPacketReceived(dataPacket);
+					OnDataPacketReceived(ipEndPoint, dataPacket);
 					DataPacketReceived?.Invoke(this, dataPacket);
 				}
 					break;
 				case PsnPacketChunkId.UnknownPacket:
 				{
 					var unknownPacket = (PsnUnknownPacketChunk)packet;
-					OnUnknownPacketReceived(unknownPacket);
+					OnUnknownPacketReceived(ipEndPoint, unknownPacket);
 					UnknownPacketReceived?.Invoke(this, unknownPacket);
 				}
 					break;
@@ -293,7 +288,7 @@ namespace DBDesign.PosiStageDotNet
 		/// <summary>
 		///     Override to provide new behavior for receipt of a PosiStageNet info packet
 		/// </summary>
-		protected virtual void OnInfoPacketReceived(PsnInfoPacketChunk infoPacket)
+		protected virtual void OnInfoPacketReceived(IPEndPoint ipEndPoint, PsnInfoPacketChunk infoPacket)
 		{
 			var headerChunk = getSingleChunk<PsnInfoHeaderChunk, PsnInfoPacketChunk>(infoPacket,
 				(ushort)PsnInfoPacketChunkId.PsnInfoHeader,
@@ -327,7 +322,7 @@ namespace DBDesign.PosiStageDotNet
 
 			if (_currentInfoPacketChunks.Count == _lastInfoPacketHeader.FramePacketCount)
 			{
-				OnCompleteInfoFrameReceived(_lastInfoPacketHeader, systemNameChunk.SystemName, _currentInfoPacketChunks);
+				OnCompleteInfoFrameReceived(ipEndPoint, _lastInfoPacketHeader, systemNameChunk.SystemName, _currentInfoPacketChunks);
 				_currentInfoPacketChunks.Clear();
 			}
 		}
@@ -338,7 +333,7 @@ namespace DBDesign.PosiStageDotNet
 		/// <param name="header"></param>
 		/// <param name="systemName"></param>
 		/// <param name="infoPackets"></param>
-		protected virtual void OnCompleteInfoFrameReceived(PsnInfoHeaderChunk header, string systemName,
+		protected virtual void OnCompleteInfoFrameReceived(IPEndPoint ipEndPoint, PsnInfoHeaderChunk header, string systemName,
 			IReadOnlyCollection<PsnInfoPacketChunk> infoPackets)
 		{
 			var infoTrackerChunks = infoPackets.SelectMany(p =>
@@ -353,10 +348,14 @@ namespace DBDesign.PosiStageDotNet
 				return;
 			}
 
-			if (RemoteSystemName != systemName)
+            var endPointData = getEndpointData(ipEndPoint);
+
+
+            if (endPointData.RemoteSystemName != systemName)
 			{
-				RemoteSystemName = systemName;
-				RemoteSystemNameUpdated?.Invoke(this, RemoteSystemName);
+                string lastSystemName = systemName;
+                endPointData.UpdateRemoteSystemName(systemName);
+				RemoteSystemNameUpdated?.Invoke(this, new Tuple<string, EndPointData>(lastSystemName, endPointData));
 			}
 
 			foreach (var chunk in infoTrackerChunks)
@@ -400,27 +399,29 @@ namespace DBDesign.PosiStageDotNet
 					continue;
 				}
 
-				if (!_trackers.TryGetValue(chunk.TrackerId, out var tracker))
-				{
-					tracker = new PsnTracker(chunk.TrackerId, trackerNameChunk.TrackerName, null, header.TimeStamp);
-					_trackers.TryAdd(chunk.TrackerId, tracker);
-				}
-				else
-				{
-					tracker = tracker.WithTrackerName(trackerNameChunk.TrackerName);
-					tracker = tracker.WithInfoTimeStamp(header.TimeStamp);
-				}
+                if(!_endpoints.TryGetValue(ipEndPoint, out var trackerList))
+                {
+                    trackerList.updateTracker(chunk, trackerNameChunk, header);
+                    _endpoints.TryAdd(ipEndPoint, trackerList);
+                }
+                else
+                {
+                    trackerList.updateTracker(chunk, trackerNameChunk, header);
+                }
 
-				_trackers[chunk.TrackerId] = tracker;
-			}
+                TrackersUpdated?.Invoke(this, new TrackerUpdateEventArgs()
+                {
+                    TrackerId = chunk.TrackerId,
+                    Data = endPointData
+                });
+            }
 
-			TrackersUpdated?.Invoke(this, Trackers);
 		}
 
 		/// <summary>
 		///     Override to provide new behavior for receipt of a PosiStageNet data packet
 		/// </summary>
-		protected virtual void OnDataPacketReceived(PsnDataPacketChunk dataPacket)
+		protected virtual void OnDataPacketReceived(IPEndPoint ipEndPoint, PsnDataPacketChunk dataPacket)
 		{
 			if (dataPacket.SubChunks.Count(c => c.ChunkId == PsnDataPacketChunkId.PsnDataHeader) > 1)
 			{
@@ -459,7 +460,7 @@ namespace DBDesign.PosiStageDotNet
 
 			if (_currentDataPacketChunks.Count == _lastDataPacketHeader.FramePacketCount)
 			{
-				OnCompleteDataFrameReceived(_lastDataPacketHeader, _currentDataPacketChunks);
+				OnCompleteDataFrameReceived(ipEndPoint, _lastDataPacketHeader, _currentDataPacketChunks);
 				_currentDataPacketChunks.Clear();
 			}
 		}
@@ -469,7 +470,7 @@ namespace DBDesign.PosiStageDotNet
 		/// </summary>
 		/// <param name="header"></param>
 		/// <param name="dataPackets"></param>
-		protected virtual void OnCompleteDataFrameReceived(PsnDataHeaderChunk header,
+		protected virtual void OnCompleteDataFrameReceived(IPEndPoint ipEndPoint, PsnDataHeaderChunk header,
 			IReadOnlyCollection<PsnDataPacketChunk> dataPackets)
 		{
 			var dataTrackerChunks = dataPackets.SelectMany(p =>
@@ -484,9 +485,11 @@ namespace DBDesign.PosiStageDotNet
 				return;
 			}
 
-			foreach (var chunk in dataTrackerChunks)
+            var endPointData = getEndpointData(ipEndPoint);
+
+            foreach (var chunk in dataTrackerChunks)
 			{
-				if (!_trackers.TryGetValue(chunk.TrackerId, out var tracker))
+				if (!endPointData.Trackers.TryGetValue(chunk.TrackerId, out var tracker))
 					tracker = new PsnTracker(chunk.TrackerId);
 
 				Tuple<float, float, float> position = null;
@@ -536,18 +539,31 @@ namespace DBDesign.PosiStageDotNet
 					timestamp: timestamp, clearTimestamp: timestamp == null,
 					validity: validity, clearValidity: validity == null);
 
-				_trackers[chunk.TrackerId] = tracker;
+                endPointData.updateTracker(tracker);
+
+                TrackersUpdated?.Invoke(this, new TrackerUpdateEventArgs()
+                {
+                    TrackerId = tracker.TrackerId,
+                    Data = endPointData
+                });
 			}
 
-			TrackersUpdated?.Invoke(this, Trackers);
 		}
 
 		/// <summary>
 		///     Override to provide new behavior for receipt of an unknown PosiStageNet packet type
 		/// </summary>
-		protected virtual void OnUnknownPacketReceived(PsnUnknownPacketChunk unknownPacket) { }
+		protected virtual void OnUnknownPacketReceived(IPEndPoint ipEndPoint, PsnUnknownPacketChunk unknownPacket) { }
 
-
+        private EndPointData getEndpointData(IPEndPoint ipEndPoint)
+        {
+            if (!_endpoints.TryGetValue(ipEndPoint, out var endPointdata))
+            {
+                endPointdata = new EndPointData(ipEndPoint);
+                _endpoints[ipEndPoint] = endPointdata;
+            }
+            return endPointdata;
+        }
 
 		private void packetReceived(object sender, UdpReceiveResult receiveResult)
         {
@@ -559,7 +575,7 @@ namespace DBDesign.PosiStageDotNet
 			if (chunk == null)
 				return;
 
-			OnPacketReceived(chunk);
+			OnPacketReceived(receiveResult.RemoteEndPoint, chunk);
 		}
 
 	    [CanBeNull]

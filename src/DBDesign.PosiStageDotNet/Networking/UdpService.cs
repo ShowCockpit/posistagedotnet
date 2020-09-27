@@ -149,13 +149,30 @@ namespace DBDesign.PosiStageDotNet.Networking
 			return _udpClient.SendAsync(data, length, endPoint);
 		}
 
+        public Task<UdpReceiveResult> ReceiveAsync(UdpClient client, CancellationToken breakToken)
+    => breakToken.IsCancellationRequested
+        ? Task<UdpReceiveResult>.Run(() => new UdpReceiveResult())
+        : Task<UdpReceiveResult>.Factory.FromAsync(
+            (callback, state) => client.BeginReceive(callback, state),
+            (ar) =>
+            {
+                /// Предотвращение <exception cref="ObjectDisposedException"/>
+                if (breakToken.IsCancellationRequested)
+                    return new UdpReceiveResult();
+
+                IPEndPoint remoteEP = null;
+                var buffer = client.EndReceive(ar, ref remoteEP);
+                return new UdpReceiveResult(buffer, remoteEP);
+            },
+            null);
+
         private async Task listenAsync(CancellationToken cancellationToken)
         {
             while (!cancellationToken.IsCancellationRequested)
             {
                 try
                 {
-                    var task = _udpClient.ReceiveAsync();
+                    var task = ReceiveAsync(_udpClient, cancellationToken);
 
                     var tcs = new TaskCompletionSource<bool>();
                     using (cancellationToken.Register(s => ((TaskCompletionSource<bool>) s).TrySetResult(true), tcs))
